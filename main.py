@@ -73,6 +73,19 @@ async def admin_refersh_access_token():
     return {"status": "ok"}
 
 
+@app.get("/admin/reload")
+async def reload():
+    global ACCESS_TOKEN
+    async with async_playwright() as p:
+        browser = await p.chromium.connect_over_cdp(
+            settings.browser_server,
+            timeout=settings.timeout
+        )
+        context = browser.contexts[0]
+        page = context.pages[0]
+        await page.reload()
+
+
 async def _reverse_proxy(request: Request):
     global ACCESS_TOKEN
     async with async_playwright() as p:
