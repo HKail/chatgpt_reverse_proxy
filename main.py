@@ -1,5 +1,6 @@
 import logging
 import uvicorn
+import threading
 
 from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -9,6 +10,8 @@ from playwright.async_api import async_playwright, Page
 from config import settings
 
 ACCESS_TOKEN = None
+refersh_access_token_lock = threading.Lock()
+_logger = logging.getLogger(__name__)
 
 
 class EndpointFilter(logging.Filter):
@@ -40,23 +43,32 @@ async def exception_handler(request: Request, exc: Exception):
 
 
 async def refersh_access_token(page: Page):
+    refersh_access_token_lock.acquire()
     global ACCESS_TOKEN
     if settings.auto_refersh_access_token and not ACCESS_TOKEN:
         await page.goto(settings.base_url)
         try:
-            checkbox = page.locator(
-                '//input[@type="checkbox"]'
-            ).wait_for(
+            await page.locator('//iframe[contains(@src, "cloudflare")]').wait_for(timeout=settings.checkbox_timeout)
+            handle = await page.query_selector('//iframe[contains(@src, "cloudflare")]')
+            await handle.wait_for_element_state(
+                "visible", timeout=settings.checkbox_timeout
+            )
+            owner_frame = await handle.content_frame()
+            await owner_frame.click(
+                '//input[@type="checkbox"]',
                 timeout=settings.checkbox_timeout
             )
-            if checkbox.count():
-                checkbox.click()
-        except Exception:
-            pass
-        async with page.expect_response("https://chat.openai.com/api/auth/session") as session:
-            value = await session.value
-            value_json = await value.json()
-            ACCESS_TOKEN = value_json["accessToken"]
+        except Exception as e:
+            _logger.exception("Checkbox not found", e)
+        try:
+            async with page.expect_response("https://chat.openai.com/api/auth/session") as session:
+                value = await session.value
+                value_json = await value.json()
+                ACCESS_TOKEN = value_json["accessToken"]
+                _logger.info("Refreshed access token")
+        except Exception as e:
+            _logger.exception("Failed to refresh access token", e)
+    refersh_access_token_lock.release()
 
 
 @app.get("/admin/refersh_access_token")
@@ -134,6 +146,9 @@ async def _reverse_proxy(request: Request):
             }
             ''' % (target_path, access_token, body, request.method.upper())
         )
+        if result["status"] in (401, 403):
+            ACCESS_TOKEN = None
+            return Response(status_code=result["status"])
         return Response(
             content=result["content"],
             status_code=result["status"],
