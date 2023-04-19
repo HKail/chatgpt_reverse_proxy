@@ -1,5 +1,6 @@
 import logging
 import uvicorn
+import threading
 
 from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -9,6 +10,7 @@ from playwright.async_api import async_playwright, Page
 from config import settings
 
 ACCESS_TOKEN = None
+refersh_access_token_lock = threading.Lock()
 _logger = logging.getLogger(__name__)
 
 
@@ -41,6 +43,7 @@ async def exception_handler(request: Request, exc: Exception):
 
 
 async def refersh_access_token(page: Page):
+    refersh_access_token_lock.acquire()
     global ACCESS_TOKEN
     if settings.auto_refersh_access_token and not ACCESS_TOKEN:
         await page.goto(settings.base_url)
@@ -57,10 +60,15 @@ async def refersh_access_token(page: Page):
             )
         except Exception as e:
             _logger.exception("Checkbox not found", e)
-        async with page.expect_response("https://chat.openai.com/api/auth/session") as session:
-            value = await session.value
-            value_json = await value.json()
-            ACCESS_TOKEN = value_json["accessToken"]
+        try:
+            async with page.expect_response("https://chat.openai.com/api/auth/session") as session:
+                value = await session.value
+                value_json = await value.json()
+                ACCESS_TOKEN = value_json["accessToken"]
+                _logger.info("Refreshed access token")
+        except Exception as e:
+            _logger.exception("Failed to refresh access token", e)
+    refersh_access_token_lock.release()
 
 
 @app.get("/admin/refersh_access_token")
